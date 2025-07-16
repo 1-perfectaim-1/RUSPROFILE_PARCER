@@ -3,6 +3,7 @@ import csv
 import os
 import re
 import math
+import datetime
 import pandas as pd
 from selenium import webdriver
 from selenium.webdriver.common.by import By
@@ -14,21 +15,21 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from webdriver_manager.chrome import ChromeDriverManager
 
-# ФИНАЛЬНАЯ ВЕРСИЯ: "Словарь-переводчик" для точного сопоставления полей.
+# Ваш рабочий словарь-переводчик
 KEY_MAP = {
     'Генеральный директор': 'Должность', 'Директор': 'Должность',
     'Управляющая организация': 'Должность', 'Президент': 'Должность',
     'Исполняющий обязанности генерального директора': 'Должность',
     'Временно исполняющий обязанности генерального директора': 'Должность',
     'И.О.генерального директора': 'Должность', 'Управляющий': 'Должность',
-    'Генральный директор': 'Должность', # На случай опечаток на сайте
+    'Генральный директор': 'Должность',
     'ИНН': 'ИНН', 'ОГРН': 'ОГРН', 'Дата регистрации': 'Дата регистрации',
     'Уставный капитал': 'Уставный капитал', 'Выручка': 'Выручка',
     'Основной вид деятельности': 'Основной вид деятельности'
 }
 
+# Ваша рабочая функция парсинга
 def parse_company_data(company_element: WebElement, fieldnames: list) -> dict:
-    """ФИНАЛЬНАЯ ВЕРСИЯ: Использует жесткую структуру и словарь-переводчик."""
     data = {key: '' for key in fieldnames}
     try:
         name_element = company_element.find_element(By.CSS_SELECTOR, ".company-item__title a")
@@ -56,13 +57,37 @@ def parse_company_data(company_element: WebElement, fieldnames: list) -> dict:
                     data[column_name] = value_text.split('\n')[0].strip()
                 else:
                     data[column_name] = value_text
-        except NoSuchElementException: continue
+        except NoSuchElementException:
+            continue
     return data
 
-def format_time(seconds: float) -> str:
-    if seconds < 0: seconds = 0
-    mins, secs = divmod(int(seconds), 60)
-    return f"{mins} мин {secs} сек"
+# Ваша рабочая функция календаря
+def set_dates_and_search_js(driver: webdriver.Chrome, wait: WebDriverWait, start_date_str: str, end_date_str: str):
+    """Напрямую вписывает даты и инициирует поиск с помощью JS-событий."""
+    try:
+        js_script = f"""
+            var start_input = document.getElementById('date-reg-from');
+            var end_input = document.getElementById('date-reg-to');
+            if (!start_input || !end_input) {{ return false; }}
+            
+            start_input.value = '{start_date_str}';
+            end_input.value = '{end_date_str}';
+            
+            var event = new Event('change', {{ bubbles: true }});
+            end_input.dispatchEvent(event);
+            return true;
+        """
+        driver.execute_script(js_script)
+        
+        time.sleep(1)
+
+    except TimeoutException:
+        print("  [i] Индикатор загрузки не появился, вероятно, для этого периода нет результатов или они загрузились мгновенно.")
+    except Exception as e:
+        print(f"  [X] Не удалось автоматически установить фильтр по дате. Перезагружаю страницу.")
+        driver.get(driver.current_url)
+        time.sleep(3)
+        raise e
 
 def main():
     output_filename_csv = "rusprofile_data.csv"
@@ -77,108 +102,86 @@ def main():
             writer = csv.DictWriter(f, fieldnames=fieldnames); writer.writeheader()
         print(f"Создан новый файл '{output_filename_csv}'")
     else:
-        print(f"Найден существующий файл '{output_filename_csv}'. Новые данные будут добавлены в него.")
-
-    chrome_options = Options(); service = Service(ChromeDriverManager().install())
+        print(f"Найден существующий файл '{output_filename_csv}'. Данные будут добавлены в него.")
+    
+    chrome_options = Options()
+    profile_path = os.path.join(os.getcwd(), "chrome_profile")
+    chrome_options.add_argument(f"user-data-dir={profile_path}")
+    
+    service = Service(ChromeDriverManager().install())
     driver = webdriver.Chrome(service=service, options=chrome_options)
     wait = WebDriverWait(driver, 20)
 
-    print("--- ШАГ 1: АВТОРИЗАЦИЯ ---")
+    print("--- ШАГ 1: НАСТРОЙКА ПРОФИЛЯ ---")
     driver.get("https://www.rusprofile.ru/")
-    input(">>> Пожалуйста, войдите в свой профиль, а затем вернитесь сюда и нажмите Enter...")
-    print("\n--- ШАГ 2: НАСТРОЙКА ФИЛЬТРОВ ---")
+    input(">>> Если вы запускаете скрипт первый раз, войдите в свой профиль. Нажмите Enter для продолжения...")
+
+    print("\n--- ШАГ 2: НАСТРОЙКА ОСНОВНЫХ ФИЛЬТРОВ ---")
     driver.get("https://www.rusprofile.ru/search-advanced")
-    input(">>> Пожалуйста, на странице поиска установите фильтры и нажмите 'Найти'. "
-          "После загрузки результатов вернитесь сюда и нажмите Enter...")
+    input(">>> Пожалуйста, установите ВСЕ нужные фильтры (ОКОПФ и т.д.), КРОМЕ ДАТЫ. Нажмите Enter...")
     
-    total_pages = 0
-    try:
-        pager_description_element = wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, "#pager-holder .description")))
-        pager_text = pager_description_element.text
-        numbers_str = re.findall(r'\d+', pager_text.replace('\xa0', '').replace(' ', ''))
-        numbers = [int(n) for n in numbers_str]
-        
-        if len(numbers) >= 3:
-            items_per_page = numbers[1]; total_items = numbers[2]
-            total_pages = math.ceil(total_items / items_per_page)
-            print(f"\n--- Найдено {total_items} организаций. Всего будет обработано ~{total_pages} страниц. ---")
-        else: raise ValueError()
-    except Exception:
-        print(f"--- Не удалось определить общее количество страниц. ETA будет недоступен. ---")
-
-    total_companies_found = 0; page_number = 1; time_per_page_history = []
-
-    while True:
-        start_time = time.time()
-        page_info = f"Страница {page_number}"
-        if total_pages > 0: page_info += f" из {total_pages}"
-        print(f"\n--- Парсинг | {page_info} ---")
-        
-        page_data = []
-        last_company_id = ""
-        try:
-            wait.until(EC.presence_of_element_located((By.ID, "additional-results")))
-            wait.until(lambda d: len(d.find_elements(By.CSS_SELECTOR, "#additional-results .company-item")) > 0)
+    total_companies_collected = 0
+    start_year = 2023
+    end_year = 1991
+    
+    for year in range(start_year, end_year - 1, -1):
+        for month_start in [1, 4, 7, 10]:
+            month_end = month_start + 2
             
-            all_cards_on_page = driver.find_elements(By.CSS_SELECTOR, "#additional-results .company-item")
-            num_companies_on_page = len(all_cards_on_page)
-            if num_companies_on_page > 0:
-                last_company_id = all_cards_on_page[-1].find_element(By.CSS_SELECTOR, "a").get_attribute('href')
-            print(f"Найдено {num_companies_on_page} компаний. Начинаю сбор...")
+            start_date = datetime.date(year, month_start, 1)
+            end_day = (datetime.date(year, month_end + 1, 1) - datetime.timedelta(days=1)).day if month_end < 12 else 31
+            end_date = datetime.date(year, month_end, end_day)
+            
+            start_date_str = start_date.strftime('%d.%m.%Y')
+            end_date_str = end_date.strftime('%d.%m.%Y')
 
-            for i in range(num_companies_on_page):
+            print("\n" + "="*50)
+            print(f"--- Начинаем сбор за период: {start_date_str} - {end_date_str} ---")
+            
+            try:
+                set_dates_and_search_js(driver, wait, start_date_str, end_date_str)
+            except Exception as e:
+                print(f"Критическая ошибка при установке фильтра. Пропускаю период. Детали: {type(e).__name__}")
+                continue
+            
+            page_number = 1
+            
+            while True:
+                print(f"--- {year} Q{month_start//3+1} | Парсинг страницы {page_number} ---")
                 try:
-                    all_cards = driver.find_elements(By.CSS_SELECTOR, "#additional-results .company-item")
-                    company_data = parse_company_data(all_cards[i], fieldnames)
-                    page_data.append(company_data)
-                except (StaleElementReferenceException, IndexError):
-                    time.sleep(1) # Даем странице "успокоиться"
-                    all_cards = driver.find_elements(By.CSS_SELECTOR, "#additional-results .company-item")
-                    if i < len(all_cards):
-                        company_data = parse_company_data(all_cards[i], fieldnames)
-                        page_data.append(company_data)
+                    all_cards = wait.until(EC.presence_of_all_elements_located((By.CSS_SELECTOR, "#additional-results .company-item")))
+                    
+                    # ИСПРАВЛЕНИЕ: Запоминаем ID первой компании
+                    first_company_id = all_cards[0].find_element(By.CSS_SELECTOR, "a").get_attribute('href')
 
-            if page_data:
-                with open(output_filename_csv, 'a', newline='', encoding='utf-8-sig') as f:
-                    writer = csv.DictWriter(f, fieldnames=fieldnames)
-                    writer.writerows(page_data)
-                total_companies_found += len(page_data)
-                print(f"Сохранено {len(page_data)} записей. Всего в файле: {total_companies_found}.")
+                    page_data = [parse_company_data(card, fieldnames) for card in all_cards]
+                    
+                    if page_data:
+                        with open(output_filename_csv, 'a', newline='', encoding='utf-8-sig') as f:
+                            writer = csv.DictWriter(f, fieldnames=fieldnames); writer.writerows(page_data)
+                        total_companies_collected += len(page_data)
+                        print(f"Сохранено {len(page_data)} записей. Всего в файле: {total_companies_collected}.")
 
-        except TimeoutException:
-            print("Не удалось дождаться загрузки списка компаний. Завершение работы."); break
+                except TimeoutException:
+                    print("Компаний для этого периода/страницы не найдено."); break
 
-        end_time = time.time(); elapsed_time = end_time - start_time
-        time_per_page_history.append(elapsed_time)
-        average_time = sum(time_per_page_history) / len(time_per_page_history)
-        if total_pages > 0 and page_number < total_pages:
-            pages_left = total_pages - page_number; eta = average_time * pages_left
-            print(f"Затрачено: {format_time(elapsed_time)}. | ETA: {format_time(eta)}")
-        else:
-            print(f"Затрачено: {format_time(elapsed_time)}.")
-
-        try:
-            next_button = wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, ".paging-list .nav-next:not(.disabled)")))
-            driver.execute_script("arguments[0].click();", next_button)
-            page_number += 1
-            
-            # ФИНАЛЬНОЕ ИСПРАВЛЕНИЕ: "Метод контрольной точки"
-            WebDriverWait(driver, 20).until(
-                lambda d: d.find_element(By.CSS_SELECTOR, "#additional-results .company-item:last-child a").get_attribute('href') != last_company_id
-            )
-        except TimeoutException:
-            print("\n[!!!] ВНИМАНИЕ: Содержимое страницы не изменилось после клика. Скрипт остановлен.")
-            user_decision = input(">>> Проверьте браузер (CAPTCHA?). Попробуйте перейти на следующую страницу вручную.\n"
-                                  ">>> Нажмите Enter, чтобы продолжить, или введите 'q' и Enter, чтобы выйти: ")
-            if user_decision.lower() == 'q': break
-            else: print("Пробую продолжить работу..."); continue 
-        except Exception:
-            print("\nКнопка 'Далее' не найдена или неактивна. Завершаю сбор."); break
-            
+                try:
+                    next_button = driver.find_element(By.CSS_SELECTOR, ".paging-list .nav-next:not(.disabled)")
+                    driver.execute_script("arguments[0].click();", next_button)
+                    page_number += 1
+                    
+                    # ИСПРАВЛЕНИЕ: Ждем, пока ID первой компании не изменится
+                    WebDriverWait(driver, 20).until(
+                        lambda d: d.find_element(By.CSS_SELECTOR, "#additional-results .company-item:first-child a").get_attribute('href') != first_company_id
+                    )
+                except TimeoutException:
+                    print("Страница не обновилась (лимит 20 страниц) или это последняя страница. Завершаю сбор для этого периода."); break
+                except (NoSuchElementException, StaleElementReferenceException):
+                    print("Кнопка 'Далее' не найдена. Завершаю сбор для этого периода."); break
+    
     driver.quit()
-
-    if total_companies_found > 0:
-        print(f"\n--- Сбор данных завершен. ---")
+    print("\n" + "="*50 + "\n--- СБОР ДАННЫХ ПОЛНОСТЬЮ ЗАВЕРШЕН ---\n" + "="*50)
+    if total_companies_collected > 0:
         try:
             print("Конвертирую в .xlsx с правильным форматом...")
             df = pd.read_csv(output_filename_csv, dtype=str)
@@ -188,7 +191,7 @@ def main():
         except Exception as e:
             print(f"Не удалось создать .xlsx файл. Ошибка: {e}. Данные сохранены в {output_filename_csv}")
     else:
-        print("\nНе было собрано ни одной записи.")
+        print("Не было собрано ни одной записи.")
 
 if __name__ == "__main__":
     main()
