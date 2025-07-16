@@ -13,49 +13,52 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from webdriver_manager.chrome import ChromeDriverManager
 
-def parse_company_data(company_element):
+def parse_company_data(company_element, fieldnames):
     """
-    Извлекает всю необходимую информацию из одного блока компании (div.company-item).
+    ИСПРАВЛЕННАЯ ФУНКЦИЯ
+    Извлекает всю необходимую информацию, используя жесткую структуру данных для надежности.
     """
-    data = {}
-    HEAD_PERSON_KEYS = [
-        'Генеральный директор', 'Директор', 'Управляющая организация',
-        'Исполняющий обязанности генерального директора', 'Президент',
-        'Временно исполняющий обязанности генерального директора',
-        'И.О.генерального директора'
-    ]
+    # ШАГ 1: Создаем пустой "шаблон" со всеми нужными колонками
+    data = {key: '' for key in fieldnames}
 
+    # ШАГ 2: Заполняем его, находя каждый элемент целенаправленно
     try:
         name_element = company_element.find_element(By.CSS_SELECTOR, ".company-item__title a")
         data['Название'] = name_element.text
         relative_link = name_element.get_attribute('href')
         if relative_link:
              data['Ссылка на Rusprofile'] = "https://www.rusprofile.ru" + relative_link
-        else:
-            data['Ссылка на Rusprofile'] = 'Не найдено'
     except NoSuchElementException:
-        data['Название'] = 'Не найдено'
-        data['Ссылка на Rusprofile'] = 'Не найдено'
+        pass # Если не нашли, значение в data останется пустым
 
     try:
         data['Адрес'] = company_element.find_element(By.CSS_SELECTOR, "address.company-item__text").text
     except NoSuchElementException:
-        data['Адрес'] = 'Не найден'
+        pass
 
+    # Ищем все элементы <dl> внутри карточки
     details = company_element.find_elements(By.CSS_SELECTOR, ".company-item-info dl")
     for detail in details:
         try:
             key = detail.find_element(By.TAG_NAME, 'dt').text.strip()
-            value_element = detail.find_element(By.TAG_NAME, 'dd')
-            value = value_element.text.strip()
-            
-            if key in HEAD_PERSON_KEYS:
+            value = detail.find_element(By.TAG_NAME, 'dd').text.strip()
+
+            # ШАГ 3: Кладем найденное значение в нужную ячейку "шаблона"
+            if 'директор' in key.lower() or 'управляющая' in key.lower() or 'президент' in key.lower():
                 data['Должность'] = key
                 data['Руководитель'] = value
+            elif key == 'ИНН':
+                data['ИНН'] = value
+            elif key == 'ОГРН':
+                data['ОГРН'] = value
+            elif key == 'Дата регистрации':
+                data['Дата регистрации'] = value
+            elif key == 'Уставный капитал':
+                data['Уставный капитал'] = value
             elif key == 'Выручка':
-                data[key] = value.split('\n')[0].strip()
-            else:
-                data[key] = value
+                data['Выручка'] = value.split('\n')[0].strip() # Убираем данные о % роста
+            elif key == 'Основной вид деятельности':
+                data['Основной вид деятельности'] = value
         except NoSuchElementException:
             continue
             
@@ -70,6 +73,7 @@ def format_time(seconds):
 def main():
     output_filename_csv = "rusprofile_data.csv"
     output_filename_xlsx = "rusprofile_data.xlsx"
+    # Этот список теперь - единый источник истины для структуры данных
     fieldnames = [
         'Название', 'Ссылка на Rusprofile', 'Должность', 'Руководитель', 'ИНН', 'ОГРН', 
         'Дата регистрации', 'Уставный капитал', 'Выручка', 
@@ -78,7 +82,7 @@ def main():
     
     if not os.path.exists(output_filename_csv):
         with open(output_filename_csv, 'w', newline='', encoding='utf-8-sig') as f:
-            writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction='ignore')
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
             writer.writeheader()
             print(f"Создан новый файл '{output_filename_csv}'")
     else:
@@ -124,11 +128,9 @@ def main():
         if total_pages > 0: page_info += f" из {total_pages}"
         print(f"\n--- Парсинг | {page_info} ---")
         
-        # --- НОВАЯ СТАБИЛЬНАЯ ЛОГИКА ПАРСИНГА СТРАНИЦЫ ---
         page_data = []
         try:
             wait.until(EC.presence_of_element_located((By.ID, "additional-results")))
-            # Ожидаем, что количество элементов станет больше 0
             wait.until(lambda d: len(d.find_elements(By.CSS_SELECTOR, "#additional-results .company-item")) > 0)
             
             num_companies_on_page = len(driver.find_elements(By.CSS_SELECTOR, "#additional-results .company-item"))
@@ -136,25 +138,25 @@ def main():
 
             for i in range(num_companies_on_page):
                 parsed = False
-                for attempt in range(3): # 3 попытки на парсинг одного элемента
+                for attempt in range(3):
                     try:
-                        # Каждый раз находим список заново
                         all_cards = driver.find_elements(By.CSS_SELECTOR, "#additional-results .company-item")
-                        current_card = all_cards[i] # Берем нужный по индексу
+                        current_card = all_cards[i]
                         
-                        company_data = parse_company_data(current_card)
+                        # Передаем fieldnames для создания шаблона
+                        company_data = parse_company_data(current_card, fieldnames)
                         page_data.append(company_data)
                         parsed = True
-                        break # Если успешно, выходим из цикла попыток
+                        break 
                     except (StaleElementReferenceException, IndexError):
                         print(f"  [!] Ошибка Stale/Index для элемента #{i+1}, попытка {attempt + 2}...")
-                        time.sleep(1) # Ждем и пробуем снова
+                        time.sleep(1)
                 if not parsed:
                     print(f"  [X] Не удалось обработать элемент #{i+1} после нескольких попыток. Пропускаю.")
             
             if page_data:
                 with open(output_filename_csv, 'a', newline='', encoding='utf-8-sig') as f:
-                    writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction='ignore')
+                    writer = csv.DictWriter(f, fieldnames=fieldnames)
                     writer.writerows(page_data)
                 total_companies_found += len(page_data)
                 print(f"Сохранено {len(page_data)} записей. Всего в файле: {total_companies_found}.")
@@ -162,7 +164,6 @@ def main():
         except TimeoutException:
             print("Не удалось дождаться загрузки списка компаний. Завершение работы.")
             break
-        # --- КОНЕЦ НОВОЙ ЛОГИКИ ---
 
         end_time = time.time()
         elapsed_time = end_time - start_time
@@ -195,6 +196,7 @@ def main():
         if not clicked_successfully:
             try:
                  if "disabled" in driver.find_element(By.CSS_SELECTOR, ".paging-list .nav-next").get_attribute("class"):
+                     print("\nКнопка 'Далее' неактивна. Это была последняя страница.")
                      break 
             except NoSuchElementException: pass
 
@@ -210,12 +212,10 @@ def main():
         print(f"\n--- Сбор данных завершен. ---")
         try:
             print("Конвертирую в .xlsx с правильным форматом...")
-            # ИСПРАВЛЕНО: Читаем CSV, принудительно считая ИНН/ОГРН текстом
-            df = pd.read_csv(output_filename_csv, dtype={'ИНН': str, 'ОГРН': str})
+            df = pd.read_csv(output_filename_csv, dtype=str) # Читаем ВСЕ как текст
             df.to_excel(output_filename_xlsx, index=False, engine='openpyxl')
             print(f"Создан файл Excel: {output_filename_xlsx}")
-            # ИСПРАВЛЕНО: CSV файл больше не удаляется
-            print(f"Итоговые данные также сохранены в файле: {output_filename_csv}")
+            print(f"Исходные данные также сохранены в файле: {output_filename_csv}")
         except Exception as e:
             print(f"Не удалось создать .xlsx файл. Ошибка: {e}. Данные сохранены в {output_filename_csv}")
     else:
